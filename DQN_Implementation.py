@@ -129,6 +129,8 @@ class QN_linear(nn.Module):
 # -------------------------------------------------------------------
 
 # -------------------- DQN class ------------------------------------
+
+#'''
 class DQN(nn.Module):
     def __init__(self, s_dim, a_dim, gamma):
         super(DQN, self).__init__()
@@ -146,7 +148,7 @@ class DQN(nn.Module):
         self.memory = Buffer()
         self.gamma = gamma
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        self.optimizer = optim.Adam(self.parameters(), lr=1e-4)
 
     def forward(self, x):
         y = F.relu(self.l1(x))
@@ -196,7 +198,74 @@ class DQN(nn.Module):
         s = Tensor(obs).view(-1, self.s_dim)
         s1 = Tensor(next_obs).view(-1, self.s_dim)
         self.memory.add_sample(s, action, reward, done*1.0, s1)
+#'''
 
+'''
+class DQN(nn.Module):
+    def __init__(self, s_dim, a_dim, gamma):
+        super(DQN, self).__init__()
+        self.s_dim = s_dim
+        self.a_dim = a_dim
+        self.h1_dim = 256
+        self.h2_dim = 64
+
+        self.l1 = nn.Linear(self.s_dim, self.h1_dim)
+        self.l2 = nn.Linear(self.h1_dim, self.h2_dim)
+        self.l3 = nn.Linear(self.h2_dim, self.a_dim)
+
+        self.memory = Buffer()
+        self.gamma = gamma
+        self.criterion = nn.MSELoss()
+        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
+
+    def forward(self, x):
+        y = F.relu(self.l1(x))
+        y = F.relu(self.l2(y))
+        y = self.l3(y)
+        return y
+
+    # TODO: supports only one input vector for now (not sure though)
+    def policy(self, x, eps=.05):
+        if np.random.rand(1) < eps:
+            return np.random.randint(0, self.a_dim)
+        else:
+            obs = torch.from_numpy(x).view(-1, self.s_dim)
+            inp = Variable(obs, volatile = True).type(FloatTensor)
+            Qvals = self.forward(inp).data
+            _, a = torch.max(Qvals, 1)
+            return a[0]
+
+    def train(self, batch_size=None):
+        if batch_size is None:
+            transition = self.memory.get_all_data()
+        else:
+            transition = self.memory.sample(batch_size)
+
+        batch = Transition(*zip(*transition))
+        batch_obs = torch.cat(batch.observations, dim=0)
+        batch_next_obs = torch.cat(batch.next_observations, dim=0)
+        batch_a = batch.actions
+        batch_r = Variable(Tensor(batch.rewards)).type(FloatTensor)
+        batch_done = Variable(Tensor(batch.dones)).type(FloatTensor)
+
+        inp = Variable(batch_next_obs, volatile=True).type(FloatTensor)
+        Q1, _ = torch.max(self.forward(inp), dim=1)
+        y = batch_r + self.gamma * (1-batch_done) * Q1
+
+        ss = Variable(batch_obs).type(FloatTensor)
+        Q_pred = self.forward(ss)[range(batch_size), list(batch_a)]
+
+        loss = self.criterion(Q_pred, y)
+        #print (loss.data[0])
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+    def add_to_memory(self, obs, action, reward, done, next_obs):
+        s = Tensor(obs).view(-1, self.s_dim)
+        s1 = Tensor(next_obs).view(-1, self.s_dim)
+        self.memory.add_sample(s, action, reward, done*1.0, s1)
+'''
 # ----------------------------------------------------------------------
 
 # ------------------ Dueling DQN --------------------------------------
@@ -300,19 +369,20 @@ if __name__ == '__main__':
     if use_cuda:
         mdl = mdl.cuda()
 
-    nepisodes = 3000
+    nepisodes = 10000
     episode_max_length = 1000
-    batch_size = 32
+    batch_size = 256
     update_frequency = 4
 
     e = 1.0
     e_min = .05
-    annealing_steps = int(1e5)
+    annealing_steps = int(1e6)
     e_step = (e - e_min)/annealing_steps
 
     i = 0
     steps = 0
     render = False
+    rall = []
 
     while i < nepisodes:
         i += 1
@@ -342,5 +412,7 @@ if __name__ == '__main__':
                 #mdl.clear_memory()
                 break
 
-        print ('Episode: %3d, e: %.4f, Reward: %3d' %(i, e, episode_reward))
+        rall.append(episode_reward)
+        print ('Episode: %3d, e: %.4f, Reward: %3d, Avg Reward: %.2f'
+               %(i, e, episode_reward, np.mean(rall[-50:])))
 
