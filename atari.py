@@ -26,6 +26,8 @@ Transition = namedtuple(
     'Transition', ('observations', 'actions', 'rewards', 'dones',
                    'next_observations')
 )
+
+EPS = 3e-3
 # -------------------------------------------------------------
 
 
@@ -79,12 +81,15 @@ class DQNmodel(object):
 
         self.main = DQN(self.s_dim, self.a_dim)
         self.target = DQN(self.s_dim, self.a_dim)
+        if use_cuda:
+            self.main.cuda()
+            self.target.cuda()
 
         self.memory = Buffer(max_length=int(1e6))
         self.gamma = gamma
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.main.parameters(), lr=1e-3)
-        self.tau = 0.01
+        self.tau = 0.001
         hard_update(self.target, self.main)
 
     def train(self, batch_size=None):
@@ -133,18 +138,12 @@ class DQNmodel(object):
         return total_reward
 
     def add_to_memory(self, obs, action, reward, done, next_obs):
-        # s = Tensor(obs).view(-1, self.s_dim)
-        # s1 = Tensor(next_obs).view(-1, self.s_dim)
-        # print (np.array(obs).shape)
-
         s = torch.unsqueeze(torch.from_numpy(np.array(obs)), 0)
         s1 = torch.unsqueeze(torch.from_numpy(np.array(next_obs)), 0)
         self.memory.add_sample(s, action, reward, done*1.0, s1)
 
-
     # TODO: supports only one input vector for now (not sure though)
     def policy(self, x, eps=.05):
-
         if np.random.rand(1) < eps:
             return self.env.action_space.sample()
         else:
@@ -170,6 +169,11 @@ class DQN(nn.Module):
         self.l1 = nn.Linear(self.h1_dim, self.h2_dim)
         self.l2 = nn.Linear(self.h2_dim, self.a_dim)
 
+        nn.init.xavier_normal(self.conv1.weight.data)
+        nn.init.xavier_normal(self.conv2.weight.data)
+        nn.init.xavier_normal(self.l1.weight.data)
+        nn.init.uniform(self.l2.weight.data, a=-EPS, b=EPS)
+
     def forward(self, x):
         y = F.relu(self.conv1(x))
         y = F.relu(self.conv2(y))
@@ -189,30 +193,37 @@ class DDQN(nn.Module):
 
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 64
-        self.h2_dim = 128
-        self.h3_dim = 64
+        self.h1_dim = 2592
+        self.h2_dim = 256
 
-        self.l1 = nn.Linear(self.s_dim, self.h1_dim)
-        self.l2 = nn.Linear(self.h1_dim, self.h2_dim)
-        self.l3 = nn.Linear(self.h2_dim, self.h3_dim)
-        self.advantage = nn.Linear(self.h3_dim, self.a_dim)
-        self.value = nn.Linear(self.h3_dim, 1)
+        self.conv1 = nn.Conv2d(in_channels=4, out_channels=16,
+                               kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32,
+                               kernel_size=4, stride=2)
+        self.l1 = nn.Linear(self.h1_dim, self.h2_dim)
+        self.advantage = nn.Linear(self.h2_dim, self.a_dim)
+        self.value = nn.Linear(self.h2_dim, 1)
+
+        nn.init.xavier_normal(self.conv1.weight.data)
+        nn.init.xavier_normal(self.conv2.weight.data)
+        nn.init.xavier_normal(self.l1.weight.data)
+        nn.init.uniform(self.advantage.weight.data, a=-EPS, b=EPS)
+        nn.init.uniform(self.value.weight.data, a=-EPS, b=EPS)
 
     def forward(self, x):
-        y = F.relu(self.l1(x))
-        y = F.relu(self.l2(y))
-        y = F.relu(self.l3(y))
+        y = F.relu(self.conv1(x))
+        y = F.relu(self.conv2(y))
+        y = F.relu(self.l1(y.view(-1, self.h1_dim)))
         adv = self.advantage(y)
-        val = self.value(y)
-        y = adv + val
-        return y
+        value = self.value(y)
+        return adv + value
 
 
 def preprocess_image(s):
     final_image = Image.fromarray(s, 'RGB').convert('L').resize((84, 84))
     # final_image.show()
     data = np.asarray(final_image).astype('float32')
+    data = data/255.0
     return data
 
 
@@ -231,8 +242,7 @@ if __name__ == '__main__':
     # mdl = QN_linear(s_dim, a_dim, gamma)
     mdl = DQNmodel(env, gamma=.99)
     # mdl = DDQN(s_dim, a_dim, gamma)
-    if use_cuda:
-        mdl = mdl.cuda()
+
 
     nepisodes = 10000
     episode_max_length = env._max_episode_steps + 1
@@ -242,7 +252,7 @@ if __name__ == '__main__':
     e_min = .05
     # set it to 2*10^5 for mountain car and 10^4 for cartpole
     # duelling DQN rocks even for 10^4 in mountain car
-    annealing_steps = int(1e5)
+    annealing_steps = int(1e6)      # one million frames
     e_step = (e - e_min) / annealing_steps
 
     i = 0
@@ -250,6 +260,7 @@ if __name__ == '__main__':
     render = False
     rall = []
     stack_size = 4
+    action_freq = 3
     image_stack = []
     pre_train_steps = batch_size + stack_size
 
@@ -278,7 +289,9 @@ if __name__ == '__main__':
         while j < episode_max_length:
             j += 1
             steps += 1
-            action = mdl.policy(image_stack, eps=e)
+            if j % action_freq == 1:
+                action = mdl.policy(image_stack, eps=e)
+
             e = max(e_min, e - e_step)
             s1, r, done, _ = env.step(action)
             s1 = preprocess_image(s1)
