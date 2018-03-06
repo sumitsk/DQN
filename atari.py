@@ -79,8 +79,8 @@ class DQNmodel(object):
         self.s_dim = env.observation_space.shape[0]
         self.a_dim = env.action_space.shape[0]
 
-        self.main = DQN(self.s_dim, self.a_dim)
-        self.target = DQN(self.s_dim, self.a_dim)
+        self.main = DDQN(self.s_dim, self.a_dim)
+        self.target = DDQN(self.s_dim, self.a_dim)
         if use_cuda:
             self.main.cuda()
             self.target.cuda()
@@ -88,7 +88,7 @@ class DQNmodel(object):
         self.memory = Buffer(max_length=int(1e6))
         self.gamma = gamma
         self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.main.parameters(), lr=1e-3)
+        self.optimizer = optim.Adam(self.main.parameters(), lr=2.5*1e-4)
         self.tau = 0.001
         hard_update(self.target, self.main)
 
@@ -159,24 +159,28 @@ class DQN(nn.Module):
         super(DQN, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 2592
-        self.h2_dim = 256
+        self.h1_dim = 3136
+        self.h2_dim = 512
 
         self.conv1 = nn.Conv2d(in_channels=4, out_channels=16,
                                kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32,
                                kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64,
+                               kernel_size=3, stride=1)
         self.l1 = nn.Linear(self.h1_dim, self.h2_dim)
         self.l2 = nn.Linear(self.h2_dim, self.a_dim)
 
         nn.init.xavier_normal(self.conv1.weight.data)
         nn.init.xavier_normal(self.conv2.weight.data)
+        nn.init.xavier_normal(self.conv3.weight.data)
         nn.init.xavier_normal(self.l1.weight.data)
         nn.init.uniform(self.l2.weight.data, a=-EPS, b=EPS)
 
     def forward(self, x):
         y = F.relu(self.conv1(x))
         y = F.relu(self.conv2(y))
+        y = F.relu(self.conv3(y))
         y = F.relu(self.l1(y.view(-1, self.h1_dim)))
         y = self.l2(y)
         return y
@@ -193,19 +197,22 @@ class DDQN(nn.Module):
 
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 2592
-        self.h2_dim = 256
+        self.h1_dim = 3136
+        self.h2_dim = 512
 
         self.conv1 = nn.Conv2d(in_channels=4, out_channels=16,
                                kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32,
                                kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64,
+                               kernel_size=3, stride=1)
         self.l1 = nn.Linear(self.h1_dim, self.h2_dim)
         self.advantage = nn.Linear(self.h2_dim, self.a_dim)
         self.value = nn.Linear(self.h2_dim, 1)
 
         nn.init.xavier_normal(self.conv1.weight.data)
         nn.init.xavier_normal(self.conv2.weight.data)
+        nn.init.xavier_normal(self.conv3.weight.data)
         nn.init.xavier_normal(self.l1.weight.data)
         nn.init.uniform(self.advantage.weight.data, a=-EPS, b=EPS)
         nn.init.uniform(self.value.weight.data, a=-EPS, b=EPS)
@@ -213,6 +220,7 @@ class DDQN(nn.Module):
     def forward(self, x):
         y = F.relu(self.conv1(x))
         y = F.relu(self.conv2(y))
+        y = F.relu(self.conv3(y))
         y = F.relu(self.l1(y.view(-1, self.h1_dim)))
         adv = self.advantage(y)
         value = self.value(y)
@@ -247,7 +255,7 @@ if __name__ == '__main__':
     nepisodes = 10000
     episode_max_length = env._max_episode_steps + 1
     batch_size = 32
-    update_frequency = 1
+    update_frequency = 4
     e = 1.0
     e_min = .05
     # set it to 2*10^5 for mountain car and 10^4 for cartpole
@@ -262,7 +270,8 @@ if __name__ == '__main__':
     stack_size = 4
     action_freq = 3
     image_stack = []
-    pre_train_steps = batch_size + stack_size
+    #pre_train_steps = batch_size + stack_size
+    pre_train_steps = 5*int(1e4)
 
     while i < nepisodes:
         i += 1
@@ -294,13 +303,15 @@ if __name__ == '__main__':
 
             e = max(e_min, e - e_step)
             s1, r, done, _ = env.step(action)
+            #print (i, j, r, done)
             s1 = preprocess_image(s1)
 
             next_image_stack = image_stack[:]
             next_image_stack.append(s1)
             next_image_stack.pop(0)
 
-            mdl.add_to_memory(image_stack, action, r, done, next_image_stack)
+            rwd = r/abs(r) if r != 0 else 0
+            mdl.add_to_memory(image_stack, action, rwd, done, next_image_stack)
             image_stack = next_image_stack[:]
 
             if render:
