@@ -6,7 +6,8 @@ import numpy as np
 import random
 from collections import namedtuple, deque
 import matplotlib.pyplot as plt
-from PIL import Image
+import cv2
+import os
 
 import torch
 import torch.nn as nn
@@ -73,6 +74,10 @@ class Buffer(object):
         return len(self.data)
 
 
+def save_checkpoint(state, filename):
+    torch.save(state, filename)
+
+
 class DQNmodel(object):
     def __init__(self, env, gamma):
         self.env = env
@@ -85,7 +90,7 @@ class DQNmodel(object):
             self.main.cuda()
             self.target.cuda()
 
-        self.memory = Buffer(max_length=int(1e6))
+        self.memory = Buffer(max_length=25*int(1e4))
         self.gamma = gamma
         self.criterion = nn.MSELoss()
         self.optimizer = optim.Adam(self.main.parameters(), lr=2.5*1e-4)
@@ -153,6 +158,13 @@ class DQNmodel(object):
             _, a = torch.max(q_values, 1)
             return a[0]
 
+    def save(self, episode_num, filename):
+        save_checkpoint({
+            'episode_number': episode_num,
+            'state_dict': self.main.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+        }, filename=filename)
+
 
 class DQN(nn.Module):
     def __init__(self, s_dim, a_dim):
@@ -194,7 +206,6 @@ class DQN(nn.Module):
 class DDQN(nn.Module):
     def __init__(self, s_dim, a_dim):
         super(DDQN, self).__init__()
-
         self.s_dim = s_dim
         self.a_dim = a_dim
         self.h1_dim = 3136
@@ -228,11 +239,10 @@ class DDQN(nn.Module):
 
 
 def preprocess_image(s):
-    final_image = Image.fromarray(s, 'RGB').convert('L').resize((84, 84))
-    # final_image.show()
-    data = np.asarray(final_image).astype('float32')
-    data = data/255.0
-    return data
+    gray = np.dot(s[..., :3], [.299, .587, .114])
+    img = cv2.resize(gray, (84, 84))
+    img = img/255.0
+    return img
 
 
 if __name__ == '__main__':
@@ -254,8 +264,9 @@ if __name__ == '__main__':
 
     nepisodes = 10000
     episode_max_length = env._max_episode_steps + 1
-    batch_size = 32
-    update_frequency = 4
+    batch_size = 64
+    stack_size = 4
+    update_frequency = 4*stack_size
     e = 1.0
     e_min = .05
     # set it to 2*10^5 for mountain car and 10^4 for cartpole
@@ -267,11 +278,15 @@ if __name__ == '__main__':
     steps = 0
     render = False
     rall = []
-    stack_size = 4
     action_freq = 3
     image_stack = []
-    #pre_train_steps = batch_size + stack_size
-    pre_train_steps = 5*int(1e4)
+    pre_train_steps = batch_size + stack_size
+    #pre_train_steps = 5*int(1e4)
+    save_freq = 100
+
+    directory = 'models'
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
     while i < nepisodes:
         i += 1
@@ -331,3 +346,8 @@ if __name__ == '__main__':
         rall.append(episode_reward)
         print ('Episode: %3d, e: %.4f, Reward: %3d, Avg Reward: %.2f'
                % (i, e, episode_reward, np.mean(rall[-100:])))
+
+        if i % save_freq == 0:
+            filename = directory + '/episode_' + str(i) + '.pt'
+            mdl.save(i, filename)
+
