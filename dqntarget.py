@@ -45,13 +45,16 @@ def hard_update(target, source):
 def save_checkpoint(state, filename):
     torch.save(state, filename)
 
-def preprocess_image(s):
-    gray = np.dot(s[..., :3], [.299, .587, .114])
+
+def preprocess_image(obs):
+    gray = np.dot(obs[..., :3], [.299, .587, .114])
     img = cv2.resize(gray, (84, 84))
     img = img / 255.0
     return img
 
 # ---------------- experience replay buffer -------------------
+
+
 class Buffer(object):
     def __init__(self, max_length=int(1e6)):
         self.max_length = max_length
@@ -76,18 +79,11 @@ class Buffer(object):
 
 
 class QN_linear(nn.Module):
-    def __init__(self, s_dim, a_dim, gamma):
+    def __init__(self, s_dim, a_dim):
         super(QN_linear, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 128
-
         self.l1 = nn.Linear(self.s_dim, self.a_dim)
-
-        self.memory = Buffer()
-        self.gamma = gamma
-        self.criterion = nn.MSELoss()
-        self.optimizer = optim.Adam(self.parameters(), lr=1e-3)
 
     def forward(self, x):
         y = self.l1(x)
@@ -95,15 +91,14 @@ class QN_linear(nn.Module):
 # -------------------------------------------------------------------
 
 
-
 class DQN(nn.Module):
     def __init__(self, s_dim, a_dim):
         super(DQN, self).__init__()
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 64
-        self.h2_dim = 128
-        self.h3_dim = 64
+        self.h1_dim = 32
+        self.h2_dim = 64
+        self.h3_dim = 32
 
         self.l1 = nn.Linear(self.s_dim, self.h1_dim)
         self.l2 = nn.Linear(self.h1_dim, self.h2_dim)
@@ -121,15 +116,16 @@ class DQN(nn.Module):
 # ------------------ Dueling DQN --------------------------------------
 
 # stands for Dueling DQN (and not Double DQN)
+
+
 class DDQN(nn.Module):
     def __init__(self, s_dim, a_dim):
         super(DDQN, self).__init__()
-
         self.s_dim = s_dim
         self.a_dim = a_dim
-        self.h1_dim = 64
-        self.h2_dim = 128
-        self.h3_dim = 64
+        self.h1_dim = 32
+        self.h2_dim = 64
+        self.h3_dim = 32
 
         self.l1 = nn.Linear(self.s_dim, self.h1_dim)
         self.l2 = nn.Linear(self.h1_dim, self.h2_dim)
@@ -183,6 +179,8 @@ class DQN_atari(nn.Module):
 # ----------------------------------------------------------------------
 
 # ------------------ Atari Dueling DQN --------------------------------------
+
+
 class DDQN_atari(nn.Module):
     def __init__(self, s_dim, a_dim):
         super(DDQN_atari, self).__init__()
@@ -231,6 +229,7 @@ class DQNmodel(object):
         self.a_dim = env.action_space.shape[0]
 
         print (network)
+
         if network == 'dqn':
             self.main = DQN(self.s_dim, self.a_dim)
             self.target = DQN(self.s_dim, self.a_dim)
@@ -256,13 +255,16 @@ class DQNmodel(object):
             self.main.cuda()
             self.target.cuda()
 
-        self.atari = True if network is 'dqn_atari' or 'ddqn_atari' else False
-        buffer_size = 125000 if self.atari else 50000
+        self.atari = True if network == 'dqn_atari' or network == 'ddqn_atari' else False
+        buffer_size = 125000 if self.atari else int(1e6)
         lr = 2.5*1e-4 if self.atari else 1e-3
-        tau = .001 if self.atari else .01
+        tau = .001
 
         self.test_rewards = []
-        self.update_steps = []
+        self.test_episodes = []
+        self.train_episodes = []
+        self.train_rewards = []
+
         self.memory = Buffer(max_length=buffer_size)
         self.gamma = gamma
         self.criterion = nn.MSELoss()
@@ -293,8 +295,9 @@ class DQNmodel(object):
 
         soft_update(self.target, self.main, self.tau)
 
-    def test(self, num_updates, nepisodes=20):
+    def test(self, episode_num, nepisodes=20, return_average=True):
         total_reward = 0
+        all_episode_rewards = []
         eps = .05
         for _ in range(nepisodes):
             episode_reward = 0
@@ -306,23 +309,55 @@ class DQNmodel(object):
                 s = s1[:]
                 if done:
                     break
+            all_episode_rewards.append(episode_reward)
             total_reward += episode_reward
-        average_reward = total_reward/nepisodes
-        self.update_steps.append(num_updates)
-        self.test_rewards.append(average_reward)
-        return average_reward
+
+        if return_average:
+            average_reward = total_reward/nepisodes
+            self.test_episodes.append(episode_num)
+            self.test_rewards.append(average_reward)
+            return average_reward
+
+        return all_episode_rewards
+
+    def test_atari(self, episode_num, nepisodes=5, return_average=True):
+        total_reward = 0
+        eps = 0.05
+        stack_size = 4
+        all_episode_rewards = []
+
+        for _ in range(nepisodes):
+            image_stack = []
+            s = self.env.reset()
+            s = preprocess_image(s)
+            for _ in range(stack_size):
+                image_stack.append(s)
+
+            episode_reward = 0
+            done = False
+            while not done:
+                action = mdl.policy(image_stack, eps=eps)
+                s1, r, done, _ = self.env.step(action)
+                s1 = preprocess_image(s1)
+                image_stack.append(s1)
+                image_stack.pop(0)
+                episode_reward += r
+
+            all_episode_rewards.append(episode_reward)
+            total_reward += episode_reward
+
+        if return_average:
+            average_reward = total_reward / nepisodes
+            self.test_episodes.append(episode_num)
+            self.test_rewards.append(average_reward)
+            return average_reward
+        return all_episode_rewards
 
     def add_to_memory(self, obs, action, reward, done, next_obs):
-        #if self.atari:
         s = torch.unsqueeze(torch.from_numpy(np.array(obs)), 0)
         s1 = torch.unsqueeze(torch.from_numpy(np.array(next_obs)), 0)
-        #else:
-        #   s = Tensor(obs).view(-1, self.s_dim)
-        #   s1 = Tensor(next_obs).view(-1, self.s_dim)
-
         self.memory.add_sample(s, action, reward, done*1.0, s1)
 
-    # TODO: supports only one input vector for now (not sure though)
     def policy(self, x, eps=.05):
         if np.random.rand(1) < eps:
             return np.random.randint(0, self.a_dim)
@@ -349,44 +384,50 @@ class DQNmodel(object):
         episode_number = checkpoint['episode_num']
         return episode_number
 
-    def plot_test_rewards(self):
-        plt.scatter(self.update_steps, self.test_rewards)
-        plt.xlabel('Number of updates')
-        plt.ylabel('Average reward')
+    def add_train_reward(self, episode_num, reward):
+        self.train_rewards.append(reward)
+        self.train_episodes.append(episode_num)
 
-        fn = self.env.env._spec._env_name + '_' + network
+    def plot_rewards(self):
+        plt.figure()
+        plt.scatter(self.test_episodes, self.test_rewards, s=30, label="Average test reward", marker='x', c='b')
+        plt.scatter(self.train_episodes, self.train_rewards, s=2, label="Training reward", marker='o', c='r')
+        plt.xlabel('Episodes')
+        plt.ylabel('Rewards')
+        plt.legend()
+
+        # due to some reason, the after else statement returns none error for space invaders env
+        env_name = 'SpaceInvaders' if self.atari else self.env.env._spec._env_name
+        plt.title(env_name)
+        fn = env_name + '_' + network
         plt.savefig(fn + '.jpg')
+        #plt.show()
 
         with open(fn + '.pickle', "wb") as output_file:
-            dict = {'update_steps': self.update_steps, 'test_rewards': self.test_rewards}
-            pickle.dump(dict, output_file)
+            dictionary = {'training_episodes': self.train_episodes,
+                          'test_episodes': self.test_episodes,
+                          'training_rewards': self.train_rewards,
+                          'test_rewards': self.test_rewards}
+            pickle.dump(dictionary, output_file)
 
-    def final_test_rewards(self, num_episodes=100):
-        all_rewards = []
-        for _ in range(num_episodes):
-            s = self.env.reset()
-            done = False
-            episode_reward = 0
-            while not done:
-                action = self.policy(s, eps=0.05)
-                s1, r, done, _ = self.env.step(action)
-                s = s1[:]
-                episode_reward += r
-            all_rewards.append(episode_reward)
+    def final_test_rewards(self, num_episodes=2):
+        all_rewards = self.test(0, nepisodes=num_episodes, return_average=False)
         mu = np.mean(all_rewards)
         std = np.std(all_rewards)
         return mu, std
 
-
-
+    def final_test_rewards_atari(self, num_episodes=2):
+        all_rewards = self.test_atari(0, nepisodes=num_episodes, return_average=False)
+        mu = np.mean(all_rewards)
+        std = np.std(all_rewards)
+        return mu, std
 
 
 if __name__ == '__main__':
     # gamma depends on the environment, so this setup
     env_names = ['MountainCar-v0', 'CartPole-v0', 'SpaceInvaders-v0']
     gammas = [1, .99, .99]
-
-    env_id = 2
+    env_id = 2                  # change this to setup different gym environments
     gamma = gammas[env_id]
     env_name = env_names[env_id]
 
@@ -394,17 +435,27 @@ if __name__ == '__main__':
     #env = gym.wrappers.Monitor(env, './videos', force=True, video_callable=lambda ep_id: ep_id % 100 == 0)
 
     networks = ['dqn', 'ddqn', 'linear_qn', 'linear_qn_replay']
-    network = networks[0]
+    network_id = 0              # change this to setup different architecture of the model
+    network = networks[network_id]
+
     if env_name is 'SpaceInvaders-v0':
         network = network + '_atari'
     mdl = DQNmodel(env, gamma, network=network)
 
-    if env_name is 'SpaceInvaders-v0':
-        nepisodes = 10000
+    # '''
+    seed = 1
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    env.seed(seed)
+    # '''
+
+    if env_name == 'SpaceInvaders-v0':
+        nepisodes = 2
         episode_max_length = env._max_episode_steps + 1
-        batch_size = 64
-        stack_size = 4
-        update_frequency = 4 * stack_size
+        batch_size = 32
+        update_frequency = 4             # after .... iterations
+        save_freq = nepisodes/10         # after .... episodes
+        test_frequency = 100             # after .... episodes
 
         e = 1.0
         e_min = .05
@@ -414,14 +465,12 @@ if __name__ == '__main__':
         i = 0
         steps = 0
         render = False
-        rall = []
         action_freq = 3
+        stack_size = 4
         image_stack = []
         pre_train_steps = batch_size + stack_size
-        # pre_train_steps = 5*int(1e4)
-        save_freq = 100
 
-        directory = 'models'
+        directory = 'models/' + env_name + '/' + network + '/'
         if not os.path.exists(directory):
             os.makedirs(directory)
 
@@ -429,6 +478,9 @@ if __name__ == '__main__':
             i += 1
             s = env.reset()
             s = preprocess_image(s)
+
+            if i % test_frequency == 0:
+                test_reward = mdl.test_atari(i)
 
             j = 0
             episode_reward = 0
@@ -467,25 +519,29 @@ if __name__ == '__main__':
                     mdl.train(batch_size)
 
                 if done:
-                    # mdl.train()
-                    # mdl.clear_memory()
                     break
 
-            rall.append(episode_reward)
-            print ('Episode: %3d, e: %.4f, Reward: %3d, Avg Reward: %.2f'
-                   % (i, e, episode_reward, np.mean(rall[-100:])))
+            mdl.add_train_reward(i, episode_reward)
+            print ('Episode: %5d, e: %.4f, Reward: %4d, Avg Reward: %.2f'
+                   % (i, e, episode_reward, np.mean(mdl.train_rewards[-100:])))
 
-            if i % save_freq == 0:
+            if i == 1 or i % save_freq == 0:
                 filename = directory + '/episode_' + str(i) + '.pt'
                 mdl.save(i, filename)
 
+        print ('Generating reward plots')
+        mdl.plot_rewards()
+        print ('Reward plots saved')
+        mu, std = mdl.final_test_rewards_atari()
+        print ('Trained model statistics: \n mean: %.4f\n std: %.4f' % (mu, std))
+
     else:
-        nepisodes = 100
+        nepisodes = 7000
         episode_max_length = env._max_episode_steps + 1
         batch_size = 32
-        update_frequency = 1
-        save_freq = 1000
-        test_frequency = 10000
+        update_frequency = 1            # after .... iterations
+        save_freq = nepisodes/5         # after .... episodes
+        test_frequency = 100            # after .... episodes
 
         e = 1.0
         e_min = .05
@@ -495,8 +551,6 @@ if __name__ == '__main__':
         i = 0
         steps = 0
         render = False
-        rall = []
-        num_updates = 0
 
         directory = 'models/' + env_name + '/' + network + '/'
         if not os.path.exists(directory):
@@ -506,6 +560,9 @@ if __name__ == '__main__':
             i += 1
             s = env.reset()
 
+            if i % test_frequency == 0:
+                test_reward = mdl.test(i)
+
             j = 0
             episode_reward = 0
             while j < episode_max_length:
@@ -514,7 +571,13 @@ if __name__ == '__main__':
                 action = mdl.policy(s, eps=e)
                 e = max(e_min, e - e_step)
                 s1, r, done, _ = env.step(action)
-                mdl.add_to_memory(s, action, r, done, s1)
+
+                # modifying done state for linear network in mountain car environment
+                if env_id == 0 and (network == 'linear_qn' or network == 'linear_qn_replay'):
+                    done_state = 1.0 if s1[0] > .5 else 0.0
+                else:
+                    done_state = done
+                mdl.add_to_memory(s, action, r, done_state, s1)
 
                 if render:
                     env.render()
@@ -524,22 +587,21 @@ if __name__ == '__main__':
 
                 if steps > batch_size and steps % update_frequency == 0:
                     mdl.train(batch_size)
-                    num_updates += 1
-
-                if num_updates > 0 and num_updates % test_frequency == 0:
-                    test_reward = mdl.test(num_updates)
-                    print ('Updates: %3d, Test reward: %3d' % (num_updates, test_reward))
 
                 if done:
                     break
 
-            rall.append(episode_reward)
+            mdl.add_train_reward(i, episode_reward)
             print ('Episode: %3d, e: %.4f, Reward: %3d, Avg Reward: %.2f'
-                   % (i, e, episode_reward, np.mean(rall[-100:])))
+                   % (i, e, episode_reward, np.mean(mdl.train_rewards[-100:])))
 
-            if i % save_freq == 0:
+            if i == 1 or i % save_freq == 0:
                 filename = directory + '/episode_' + str(i) + '.pt'
                 mdl.save(i, filename)
 
-    print ('plotting test rewards')
-    mdl.plot_test_rewards()
+        print ('Generating reward plots')
+        mdl.plot_rewards()
+        print ('Reward plots saved')
+        mu, std = mdl.final_test_rewards()
+        print ('Trained model statistics: \n mean: %.4f\n std: %.4f' % (mu, std))
+
